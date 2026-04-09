@@ -297,6 +297,7 @@ convertBtn.addEventListener('click', async () => {
   // For 5 GB+ mbox files the old .join() approach could exceed JS string limits.
   const blobParts = [];
   let previewText = '';
+  let previewTruncated = false;
   const PREVIEW_LIMIT = 3000;
   const withContent = results.length;
 
@@ -304,9 +305,11 @@ convertBtn.addEventListener('click', async () => {
     if (i > 0) blobParts.push(separator);
     blobParts.push(results[i].text);
 
-    if (previewText.length < PREVIEW_LIMIT) {
+    if (!previewTruncated && previewText.length < PREVIEW_LIMIT) {
       if (i > 0) previewText += separator;
       previewText += results[i].text;
+    } else {
+      previewTruncated = true;
     }
 
     // Yield periodically during assembly to keep UI responsive
@@ -336,7 +339,7 @@ convertBtn.addEventListener('click', async () => {
     <div class="stat"><div class="value">${reduction}%</div><div class="label">Reduction</div></div>
   `;
 
-  previewEl.textContent = previewText.slice(0, PREVIEW_LIMIT) + (previewText.length > PREVIEW_LIMIT ? '\n\n… (truncated preview)' : '');
+  previewEl.textContent = previewText.slice(0, PREVIEW_LIMIT) + (previewTruncated ? '\n\n… (truncated preview)' : '');
 
   progressFill.style.width = '100%';
   progressText.textContent = 'Done!';
@@ -831,7 +834,6 @@ async function processMboxStream(file, opts) {
     }
 
     await tick(); // yield to browser between chunks
-    lastYield = performance.now();
   }
 
   // Flush the last email
