@@ -578,8 +578,15 @@ function handleMultipart(bodyRaw, contentType) {
 function stripFallback(text) {
   // If we couldn't parse multipart properly, try to extract any readable text
   let t = htmlToText(text);
-  // Remove long base64 blocks
-  t = t.replace(/[A-Za-z0-9+/=]{76,}/g, '');
+  // Remove long base64 blocks (40+ chars)
+  t = t.replace(/[A-Za-z0-9+/=]{40,}/g, '');
+  // Remove MIME boundary markers
+  t = t.replace(/^-{2,}[=_A-Za-z0-9.+:]{6,}-{0,2}$/gm, '');
+  // Remove stray MIME headers
+  t = t.replace(/^Content-(Type|Transfer-Encoding|Disposition|ID|Description)\s*:.*$/gim, '');
+  t = t.replace(/^MIME-Version\s*:.*$/gim, '');
+  // Remove HTML comment remnants
+  t = t.replace(/^-->\s*$/gm, '');
   return t;
 }
 
@@ -757,9 +764,18 @@ function cleanText(text, keepQuotes, minimalCleaning) {
   // Normalize line endings
   t = t.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-  // Remove stray base64 blocks that leaked through.
-  // Require 76+ chars (standard base64 line length) AND no spaces (pure base64).
-  t = t.replace(/^[A-Za-z0-9+/]{76,}={0,2}$/gm, '');
+  // Remove stray base64 blocks that leaked through (40+ chars, no spaces).
+  t = t.replace(/^[A-Za-z0-9+/]{40,}={0,2}$/gm, '');
+
+  // Remove MIME boundary markers (e.g. ------=_NextPart_000_4148_01D8A765.F4FBFC80)
+  t = t.replace(/^-{2,}[=_A-Za-z0-9.+:]{6,}-{0,2}$/gm, '');
+
+  // Remove stray MIME headers that leaked into the body text
+  t = t.replace(/^Content-(Type|Transfer-Encoding|Disposition|ID|Description)\s*:.*$/gim, '');
+  t = t.replace(/^MIME-Version\s*:.*$/gim, '');
+
+  // Remove HTML comment remnants (e.g. -->)
+  t = t.replace(/^-->\s*$/gm, '');
 
   if (!minimalCleaning) {
     if (!keepQuotes) {
