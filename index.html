@@ -163,6 +163,12 @@
 
     .hidden { display: none; }
 
+    .warning-message {
+      color: #fbbf24;
+      font-size: .82rem;
+      margin-top: .6rem;
+    }
+
     footer {
       margin-top: auto;
       padding-top: 2rem;
@@ -193,6 +199,7 @@
       <label><input type="checkbox" id="optSeparator" checked> Separator between emails</label>
       <label><input type="checkbox" id="optTimestamp" checked> Sort by date</label>
       <label><input type="checkbox" id="optQuotes"> Keep quoted replies</label>
+      <label><input type="checkbox" id="optMinimal"> Minimal cleaning (only strip HTML/MIME, keep all text)</label>
     </div>
 
     <button class="btn" id="convertBtn" disabled>
@@ -273,12 +280,13 @@ convertBtn.addEventListener('click', async () => {
     keepHeaders: document.getElementById('optHeaders').checked,
     showLabels: document.getElementById('optLabels').checked,
     keepQuotes: document.getElementById('optQuotes').checked,
+    minimalCleaning: document.getElementById('optMinimal').checked,
   };
   const addSeparator = document.getElementById('optSeparator').checked;
   const sortByDate = document.getElementById('optTimestamp').checked;
 
   // Stream-process the file in chunks to avoid loading the whole file into memory
-  const { results, totalEmails } = await processMboxStream(selectedFile, opts);
+  const { results, totalEmails, rawFallbackCount } = await processMboxStream(selectedFile, opts);
 
   if (sortByDate) {
     setStatus('Sorting emails by date…');
@@ -337,7 +345,14 @@ convertBtn.addEventListener('click', async () => {
     <div class="stat"><div class="value">${formatBytes(selectedFile.size)}</div><div class="label">Original size</div></div>
     <div class="stat"><div class="value">${formatBytes(cleanedSize)}</div><div class="label">Clean size</div></div>
     <div class="stat"><div class="value">${reduction}%</div><div class="label">Reduction</div></div>
+    ${rawFallbackCount > 0 ? `<div class="stat"><div class="value">${rawFallbackCount}</div><div class="label">Raw fallback used</div></div>` : ''}
   `;
+  if (parseFloat(reduction) > 95) {
+    const warn = document.createElement('p');
+    warn.className = 'warning-message';
+    warn.textContent = '⚠ Reduction is above 95% — try enabling "Keep quoted replies" and/or "Minimal cleaning" for better results.';
+    statsEl.appendChild(warn);
+  }
 
   previewEl.textContent = previewText.slice(0, PREVIEW_LIMIT) + (previewTruncated ? '\n\n… (truncated preview)' : '');
 
@@ -417,11 +432,15 @@ function cleanEmail(raw, opts) {
 
   let body = extractBody(bodyRaw, contentType, encoding);
 
+  // Raw decoded body (before aggressive cleaning) — used as fallback
+  const rawBody = body;
+
   // Clean up the body text
-  body = cleanText(body, opts.keepQuotes);
+  body = cleanText(body, opts.keepQuotes, opts.minimalCleaning);
 
   // Build output
   let text = '';
+  let headerText = '';
   const dateObj = headers['date'] ? parseDate(headers['date']) : null;
 
   if (opts.keepHeaders) {
@@ -434,12 +453,12 @@ function cleanEmail(raw, opts) {
     if (opts.showLabels && headers['x-gmail-labels']) {
       parts.push(`Labels: ${headers['x-gmail-labels'].trim()}`);
     }
-    if (parts.length) text += parts.join('\n') + '\n\n';
+    if (parts.length) headerText = parts.join('\n') + '\n\n';
   }
 
-  text += body;
+  text = headerText + body;
 
-  return { text: text.trim(), body: body.trim(), date: dateObj, subject: headers['subject'] ? decodeHeaderValue(headers['subject']) : '' };
+  return { text: text.trim(), body: body.trim(), rawBody: rawBody.trim(), headerText, date: dateObj, subject: headers['subject'] ? decodeHeaderValue(headers['subject']) : '' };
 }
 
 function parseDate(str) {
@@ -476,6 +495,11 @@ function extractBody(bodyRaw, contentType, encoding) {
   }
 
   let decoded = decodeContent(bodyRaw, encoding);
+
+  // MIME fallback: if decoding produced nothing but raw body has content, use raw with HTML stripped
+  if (!decoded.trim() && bodyRaw.trim()) {
+    decoded = htmlToText(bodyRaw);
+  }
 
   if (contentType.includes('text/html')) {
     decoded = htmlToText(decoded);
@@ -691,44 +715,61 @@ function decodeHTMLEntities(text) {
 // TEXT CLEANUP
 // ──────────────────────────────────────────
 
-function cleanText(text, keepQuotes) {
+function cleanText(text, keepQuotes, minimalCleaning) {
   let t = text;
 
   // Normalize line endings
   t = t.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-  // Remove stray base64 blocks that leaked through (long lines of base64 chars)
-  t = t.replace(/^[A-Za-z0-9+/]{60,}={0,2}$/gm, '');
+  // Remove stray base64 blocks that leaked through.
+  // Require 76+ chars (standard base64 line length) AND no spaces (pure base64).
+  t = t.replace(/^[A-Za-z0-9+/]{76,}={0,2}$/gm, '');
 
-  if (!keepQuotes) {
-    // Remove quoted reply lines (lines starting with >)
-    t = t.replace(/^>+\s?.*$/gm, '');
+  if (!minimalCleaning) {
+    if (!keepQuotes) {
+      // Remove quoted reply lines (lines starting with >), but only if doing so
+      // leaves at least 10% of the body intact. If stripping would remove more
+      // than 90% of the content, keep the quoted lines.
+      const lines = t.split('\n');
+      const quotedLines = lines.filter(line => /^>/.test(line));
+      const quotedRatio = lines.length > 0 ? quotedLines.length / lines.length : 0;
+      if (quotedRatio <= 0.9) {
+        t = t.replace(/^>+\s?.*$/gm, '');
+      }
 
-    // "On ... wrote:" attribution lines
-    t = t.replace(/^On .{10,200} wrote:\s*$/gm, '');
+      // "On ... wrote:" attribution lines
+      t = t.replace(/^On .{10,200} wrote:\s*$/gm, '');
 
-    // Forwarded message headers
-    t = t.replace(/^-{2,}\s*Forwarded message\s*-{2,}$/gim, '');
-    t = t.replace(/^-{2,}\s*Original Message\s*-{2,}$/gim, '');
+      // Forwarded message dividers
+      t = t.replace(/^-{2,}\s*Forwarded message\s*-{2,}$/gim, '');
+      t = t.replace(/^-{2,}\s*Original Message\s*-{2,}$/gim, '');
 
-    // Remove inline forwarded-message headers (short single-line headers inside the body)
-    const MAX_FORWARDED_HEADER_LEN = 200;
-    t = t.replace(/^(From|Sent|To|Cc|Subject|Date|Importance):\s.*$/gm, (match) => {
-      if (match.length < MAX_FORWARDED_HEADER_LEN) return '';
-      return match;
-    });
+      // Remove inline forwarded-message headers — but ONLY after a clear
+      // "Forwarded message" or "Original Message" divider line.
+      const fwdDivider = /^-{2,}\s*(Forwarded message|Original Message)\s*-{2,}$/im;
+      const dividerMatch = fwdDivider.exec(t);
+      if (dividerMatch) {
+        const before = t.slice(0, dividerMatch.index);
+        let after = t.slice(dividerMatch.index + dividerMatch[0].length);
+        after = after.replace(/^(From|Sent|To|Cc|Subject|Date|Importance):\s.*$/gm, '');
+        t = before + after;
+      }
+    }
+
+    // Signature block: "-- " followed by signature text. Only strip if it appears
+    // in the last 15% of the email so we don't remove actual content.
+    const MIN_SIG_POSITION = 0.85;
+    const sigIdx = t.indexOf('\n-- \n');
+    if (sigIdx > -1 && sigIdx > t.length * MIN_SIG_POSITION) {
+      t = t.slice(0, sigIdx);
+    }
+
+    // Remove common legal disclaimers / confidentiality notices — only at end of body
+    // and only when the match is very specific (not a broad mid-body match).
+    t = t.replace(/\n{1,2}(?:CONFIDENTIALITY NOTICE|DISCLAIMER):\s[\s\S]{0,800}$/i, '');
+    t = t.replace(/\n{1,2}(?:This (?:email|message) (?:and any|is intended|contains))[\s\S]{0,800}$/i, '');
+    t = t.replace(/\n{1,2}(?:If you are not the intended recipient)[\s\S]{0,800}$/i, '');
   }
-
-  // Signature block: "-- " followed by signature text. Only strip if it appears
-  // past the first 30% of the email so we don't remove actual content.
-  const MIN_SIG_POSITION = 0.3;
-  const sigIdx = t.indexOf('\n-- \n');
-  if (sigIdx > -1 && sigIdx > t.length * MIN_SIG_POSITION) {
-    t = t.slice(0, sigIdx);
-  }
-
-  // Remove common legal disclaimers / confidentiality notices
-  t = t.replace(/(?:^|\n)(?:CONFIDENTIALITY NOTICE|DISCLAIMER|This email and any|This message is intended|If you are not the intended)[\s\S]{0,1000}$/i, '');
 
   // Remove URLs that are tracking pixels or unsubscribe links (very long URLs)
   t = t.replace(/https?:\/\/\S{150,}/g, '[link]');
@@ -777,6 +818,17 @@ function readSliceAsText(slice) {
 
 // Stream-process an mbox file in fixed-size chunks so the entire file is
 // never held in memory at once (critical for files > 1 GB).
+
+// Helper: push a cleaned email to results, falling back to raw body if cleaned is empty.
+function pushEmail(cleaned, results, rawFallbackCountRef) {
+  if (cleaned.body.trim().length > 0) {
+    results.push(cleaned);
+  } else if (cleaned.rawBody.trim().length > 0) {
+    rawFallbackCountRef.count++;
+    results.push({ ...cleaned, body: cleaned.rawBody, text: cleaned.headerText + cleaned.rawBody });
+  }
+}
+
 async function processMboxStream(file, opts) {
   const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB per chunk
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
@@ -786,6 +838,7 @@ async function processMboxStream(file, opts) {
   let currentEmailBuf = [];  // lines of the email being accumulated
   const results = [];
   let totalEmails = 0;
+  const rawFallbackCountRef = { count: 0 };
   let lastYield = performance.now();
   const YIELD_INTERVAL = 50; // yield to browser every 50 ms
 
@@ -814,7 +867,7 @@ async function processMboxStream(file, opts) {
         const raw = currentEmailBuf.join('\n');
         const cleaned = cleanEmail(raw, opts);
         totalEmails++;
-        if (cleaned.body.trim().length > 0) results.push(cleaned);
+        pushEmail(cleaned, results, rawFallbackCountRef);
         currentEmailBuf = [line];
 
         // Time-based yielding keeps the UI responsive even with very
@@ -842,10 +895,10 @@ async function processMboxStream(file, opts) {
     const raw = currentEmailBuf.join('\n');
     const cleaned = cleanEmail(raw, opts);
     totalEmails++;
-    if (cleaned.body.trim().length > 0) results.push(cleaned);
+    pushEmail(cleaned, results, rawFallbackCountRef);
   }
 
-  return { results, totalEmails };
+  return { results, totalEmails, rawFallbackCount: rawFallbackCountRef.count };
 }
 
 function setStatus(msg) {
