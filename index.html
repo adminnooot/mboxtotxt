@@ -438,8 +438,9 @@ function cleanEmail(raw, opts) {
 
   let body = extractBody(bodyRaw, contentType, encoding);
 
-  // Raw decoded body (before aggressive cleaning) — used as fallback
-  const rawBody = body;
+  // True raw fallback: use the original body text (with HTML stripped) so that
+  // even when MIME parsing completely fails we still capture something readable.
+  const rawBody = body.trim() ? body : stripFallback(bodyRaw);
 
   // Clean up the body text
   body = cleanText(body, opts.keepQuotes, opts.minimalCleaning);
@@ -497,10 +498,14 @@ function parseHeaders(block) {
 function extractBody(bodyRaw, contentType, encoding) {
   // Handle multipart messages
   if (contentType.includes('multipart/')) {
-    return handleMultipart(bodyRaw, contentType);
+    const result = handleMultipart(bodyRaw, contentType);
+    if (result.trim()) return result;
+    // If multipart parsing failed entirely, try to decode the body directly
+    return stripFallback(bodyRaw);
   }
 
-  let decoded = decodeContent(bodyRaw, encoding);
+  const charset = extractCharset(contentType);
+  let decoded = decodeContent(bodyRaw, encoding, charset);
 
   // MIME fallback: if decoding produced nothing but raw body has content, use raw with HTML stripped
   if (!decoded.trim() && bodyRaw.trim()) {
@@ -518,8 +523,9 @@ function extractBody(bodyRaw, contentType, encoding) {
 }
 
 function handleMultipart(bodyRaw, contentType) {
-  // Extract boundary
-  const boundaryMatch = contentType.match(/boundary\s*=\s*"?([^";\s]+)"?/i);
+  // Extract boundary — handle both quoted and unquoted forms
+  const boundaryMatch = contentType.match(/boundary\s*=\s*"([^"]+)"/i)
+    || contentType.match(/boundary\s*=\s*([^";\s]+)/i);
   if (!boundaryMatch) return stripFallback(bodyRaw);
 
   const boundary = boundaryMatch[1];
@@ -552,19 +558,21 @@ function handleMultipart(bodyRaw, contentType) {
         plainText += nested + '\n';
       }
     } else if (partCT.includes('text/plain')) {
-      const decoded = decodeContent(partBody, partEnc);
+      const partCharset = extractCharset(partCT);
+      const decoded = decodeContent(partBody, partEnc, partCharset);
       if (decoded.trim()) plainText += decoded + '\n';
     } else if (partCT.includes('text/html')) {
-      const decoded = decodeContent(partBody, partEnc);
+      const partCharset = extractCharset(partCT);
+      const decoded = decodeContent(partBody, partEnc, partCharset);
       if (decoded.trim()) htmlText += decoded + '\n';
     }
     // Skip application/*, image/*, audio/*, etc.
   }
 
-  // Prefer plain text; fall back to converted HTML
+  // Prefer plain text; fall back to converted HTML; last resort: strip raw body
   if (plainText.trim()) return plainText;
   if (htmlText.trim()) return htmlToText(htmlText);
-  return '';
+  return stripFallback(bodyRaw);
 }
 
 function stripFallback(text) {
@@ -575,10 +583,15 @@ function stripFallback(text) {
   return t;
 }
 
-function decodeContent(text, encoding) {
+function extractCharset(contentType) {
+  const match = contentType.match(/charset\s*=\s*"?([^";\s]+)"?/i);
+  return match ? match[1] : 'utf-8';
+}
+
+function decodeContent(text, encoding, charset) {
   if (encoding === 'base64') {
     try {
-      return decodeBase64UTF8(text);
+      return decodeBase64(text, charset || 'utf-8');
     } catch {
       return '';
     }
@@ -589,24 +602,41 @@ function decodeContent(text, encoding) {
   return text;
 }
 
-function decodeBase64UTF8(str) {
+function decodeBase64(str, charset) {
   const cleaned = str.replace(/[\s\r\n]/g, '');
   if (!cleaned) return '';
+  // Fix padding: atob requires length to be a multiple of 4.
+  // Valid base64 can only have remainder 0, 2, or 3. Remainder 1 is invalid;
+  // trim the trailing character to attempt recovery.
+  let padded = cleaned;
+  const remainder = cleaned.length % 4;
+  if (remainder === 2) padded = cleaned + '==';
+  else if (remainder === 3) padded = cleaned + '=';
+  else if (remainder === 1) padded = cleaned.slice(0, -1);
   try {
-    // Decode base64 to bytes, then interpret as UTF-8
-    const binaryStr = atob(cleaned);
+    const binaryStr = atob(padded);
     const bytes = new Uint8Array(binaryStr.length);
     for (let i = 0; i < binaryStr.length; i++) {
       bytes[i] = binaryStr.charCodeAt(i);
     }
-    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    try {
+      return new TextDecoder(charset || 'utf-8', { fatal: false }).decode(bytes);
+    } catch {
+      return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    }
   } catch {
     try {
+      // Retry without padding fix
       return atob(cleaned);
     } catch {
       return '';
     }
   }
+}
+
+// Keep legacy alias for any external callers
+function decodeBase64UTF8(str) {
+  return decodeBase64(str, 'utf-8');
 }
 
 function decodeQuotedPrintable(str) {
@@ -822,6 +852,15 @@ function readSliceAsText(slice) {
   });
 }
 
+function readSliceAsArrayBuffer(slice) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(slice);
+  });
+}
+
 // Stream-process an mbox file in fixed-size chunks so the entire file is
 // never held in memory at once (critical for files > 1 GB).
 
@@ -832,6 +871,10 @@ function pushEmail(cleaned, results, rawFallbackCountRef) {
   } else if (cleaned.rawBody.trim().length > 0) {
     rawFallbackCountRef.count++;
     results.push({ ...cleaned, body: cleaned.rawBody, text: cleaned.headerText + cleaned.rawBody });
+  } else if (cleaned.headerText.trim().length > 0) {
+    // Last resort: keep the email with just headers (e.g. empty body emails)
+    rawFallbackCountRef.count++;
+    results.push({ ...cleaned, text: cleaned.headerText.trim() });
   }
 }
 
@@ -848,6 +891,10 @@ async function processMboxStream(file, opts) {
   let lastYield = performance.now();
   const YIELD_INTERVAL = 50; // yield to browser every 50 ms
 
+  // Use a streaming TextDecoder so multi-byte UTF-8 characters that span
+  // chunk boundaries are decoded correctly instead of being replaced with U+FFFD.
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+
   while (offset < file.size) {
     chunkIndex++;
     const end = Math.min(offset + CHUNK_SIZE, file.size);
@@ -860,7 +907,8 @@ async function processMboxStream(file, opts) {
       `${formatBytes(offset)} read · ${totalEmails} emails processed`
     );
 
-    const chunkText = await readSliceAsText(file.slice(offset, end));
+    const arrayBuf = await readSliceAsArrayBuffer(file.slice(offset, end));
+    const chunkText = decoder.decode(new Uint8Array(arrayBuf), { stream: end < file.size });
     offset = end;
 
     const combined = leftover + chunkText;
@@ -919,6 +967,15 @@ function formatBytes(bytes) {
 }
 
 function tick() {
+  // Use MessageChannel to yield to the browser event loop without the 1-second
+  // throttling that setTimeout receives in background tabs.
+  if (typeof MessageChannel !== 'undefined') {
+    return new Promise(resolve => {
+      const ch = new MessageChannel();
+      ch.port1.onmessage = () => resolve();
+      ch.port2.postMessage(null);
+    });
+  }
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 </script>
