@@ -239,7 +239,7 @@ const previewEl = document.getElementById('preview');
 const downloadBtn = document.getElementById('downloadBtn');
 
 let selectedFile = null;
-let cleanedOutput = '';
+let outputBlob = null;
 
 // ── File selection ──
 dropzone.addEventListener('click', () => fileInput.click());
@@ -281,6 +281,8 @@ convertBtn.addEventListener('click', async () => {
   const { results, totalEmails } = await processMboxStream(selectedFile, opts);
 
   if (sortByDate) {
+    setStatus('Sorting emails by date…');
+    await tick();
     results.sort((a, b) => (a.date || 0) - (b.date || 0));
   }
 
@@ -290,34 +292,63 @@ convertBtn.addEventListener('click', async () => {
   await tick();
 
   const separator = addSeparator ? '\n' + '─'.repeat(60) + '\n\n' : '\n\n';
-  cleanedOutput = results.map(e => e.text).join(separator);
 
-  const cleanedSize = new Blob([cleanedOutput]).size;
+  // Build output as Blob parts to avoid creating one giant string in memory.
+  // For 5 GB+ mbox files the old .join() approach could exceed JS string limits.
+  const blobParts = [];
+  let previewText = '';
+  const PREVIEW_LIMIT = 3000;
+  const withContent = results.length;
+
+  for (let i = 0; i < results.length; i++) {
+    if (i > 0) blobParts.push(separator);
+    blobParts.push(results[i].text);
+
+    if (previewText.length < PREVIEW_LIMIT) {
+      if (i > 0) previewText += separator;
+      previewText += results[i].text;
+    }
+
+    // Yield periodically during assembly to keep UI responsive
+    if (i % 500 === 0 && i > 0) {
+      progressText.textContent = `Building output… ${i} / ${withContent} emails`;
+      await tick();
+    }
+  }
+
+  // Create Blob for download — avoids holding one huge string in memory
+  outputBlob = new Blob(blobParts, { type: 'text/plain;charset=utf-8' });
+  const cleanedSize = outputBlob.size;
+
+  // Free intermediate data
+  blobParts.length = 0;
+  results.length = 0;
+
   const reduction = selectedFile.size > 0
     ? ((1 - cleanedSize / selectedFile.size) * 100).toFixed(1)
     : '0';
 
   statsEl.innerHTML = `
     <div class="stat"><div class="value">${totalEmails}</div><div class="label">Emails found</div></div>
-    <div class="stat"><div class="value">${results.length}</div><div class="label">With content</div></div>
+    <div class="stat"><div class="value">${withContent}</div><div class="label">With content</div></div>
     <div class="stat"><div class="value">${formatBytes(selectedFile.size)}</div><div class="label">Original size</div></div>
     <div class="stat"><div class="value">${formatBytes(cleanedSize)}</div><div class="label">Clean size</div></div>
     <div class="stat"><div class="value">${reduction}%</div><div class="label">Reduction</div></div>
   `;
 
-  previewEl.textContent = cleanedOutput.slice(0, 3000) + (cleanedOutput.length > 3000 ? '\n\n… (truncated preview)' : '');
+  previewEl.textContent = previewText.slice(0, PREVIEW_LIMIT) + (previewText.length > PREVIEW_LIMIT ? '\n\n… (truncated preview)' : '');
 
   progressFill.style.width = '100%';
   progressText.textContent = 'Done!';
-  setStatus(`Finished — ${results.length} of ${totalEmails} emails had readable content.`);
+  setStatus(`Finished — ${withContent} of ${totalEmails} emails had readable content.`);
   resultsCard.classList.remove('hidden');
   convertBtn.disabled = false;
 });
 
 // ── Download ──
 downloadBtn.addEventListener('click', () => {
-  const blob = new Blob([cleanedOutput], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
+  if (!outputBlob) return;
+  const url = URL.createObjectURL(outputBlob);
   const a = document.createElement('a');
   a.href = url;
   a.download = (selectedFile ? selectedFile.name.replace(/\.mbox$/i, '') : 'emails') + '_clean.txt';
@@ -752,6 +783,8 @@ async function processMboxStream(file, opts) {
   let currentEmailBuf = [];  // lines of the email being accumulated
   const results = [];
   let totalEmails = 0;
+  let lastYield = performance.now();
+  const YIELD_INTERVAL = 50; // yield to browser every 50 ms
 
   while (offset < file.size) {
     chunkIndex++;
@@ -781,12 +814,16 @@ async function processMboxStream(file, opts) {
         if (cleaned.body.trim().length > 0) results.push(cleaned);
         currentEmailBuf = [line];
 
-        if (totalEmails % 25 === 0) {
+        // Time-based yielding keeps the UI responsive even with very
+        // small or very large emails.
+        const now = performance.now();
+        if (now - lastYield > YIELD_INTERVAL) {
           setStatus(
             `Chunk ${chunkIndex}/${totalChunks} · ` +
             `email ${totalEmails} · subject: ${(cleaned.subject || '').trim() || '(no subject)'}`
           );
           await tick();
+          lastYield = performance.now();
         }
       } else {
         currentEmailBuf.push(line);
@@ -794,6 +831,7 @@ async function processMboxStream(file, opts) {
     }
 
     await tick(); // yield to browser between chunks
+    lastYield = performance.now();
   }
 
   // Flush the last email
