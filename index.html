@@ -573,7 +573,6 @@ function decodeHeaderValue(str) {
         for (let i = 0; i < binaryStr.length; i++) {
           bytes[i] = binaryStr.charCodeAt(i);
         }
-        const encoding = charset.toLowerCase().replace('windows-', 'windows').replace('iso-', 'iso');
         try {
           return new TextDecoder(charset, { fatal: false }).decode(bytes);
         } catch {
@@ -678,17 +677,19 @@ function cleanText(text, keepQuotes) {
     t = t.replace(/^-{2,}\s*Forwarded message\s*-{2,}$/gim, '');
     t = t.replace(/^-{2,}\s*Original Message\s*-{2,}$/gim, '');
 
-    // Remove "From: / Sent: / To: / Subject:" blocks that appear inside forwarded text
+    // Remove inline forwarded-message headers (short single-line headers inside the body)
+    const MAX_FORWARDED_HEADER_LEN = 200;
     t = t.replace(/^(From|Sent|To|Cc|Subject|Date|Importance):\s.*$/gm, (match) => {
-      // Only remove if it looks like a forwarded/quoted header (short line in middle of text)
-      if (match.length < 200) return '';
+      if (match.length < MAX_FORWARDED_HEADER_LEN) return '';
       return match;
     });
   }
 
-  // Signature blocks (-- \n followed by the rest)
+  // Signature block: "-- " followed by signature text. Only strip if it appears
+  // past the first 30% of the email so we don't remove actual content.
+  const MIN_SIG_POSITION = 0.3;
   const sigIdx = t.indexOf('\n-- \n');
-  if (sigIdx > -1 && sigIdx > t.length * 0.3) {
+  if (sigIdx > -1 && sigIdx > t.length * MIN_SIG_POSITION) {
     t = t.slice(0, sigIdx);
   }
 
