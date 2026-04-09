@@ -440,7 +440,7 @@ function cleanEmail(raw, opts) {
 
   // True raw fallback: use the original body text (with HTML stripped) so that
   // even when MIME parsing completely fails we still capture something readable.
-  const rawBody = body || stripFallback(bodyRaw);
+  const rawBody = body.trim() ? body : stripFallback(bodyRaw);
 
   // Clean up the body text
   body = cleanText(body, opts.keepQuotes, opts.minimalCleaning);
@@ -524,9 +524,8 @@ function extractBody(bodyRaw, contentType, encoding) {
 
 function handleMultipart(bodyRaw, contentType) {
   // Extract boundary — handle both quoted and unquoted forms
-  const quotedMatch = contentType.match(/boundary\s*=\s*"([^"]+)"/i);
-  const unquotedMatch = contentType.match(/boundary\s*=\s*([^";\s]+)/i);
-  const boundaryMatch = quotedMatch || unquotedMatch;
+  const boundaryMatch = contentType.match(/boundary\s*=\s*"([^"]+)"/i)
+    || contentType.match(/boundary\s*=\s*([^";\s]+)/i);
   if (!boundaryMatch) return stripFallback(bodyRaw);
 
   const boundary = boundaryMatch[1];
@@ -606,10 +605,14 @@ function decodeContent(text, encoding, charset) {
 function decodeBase64(str, charset) {
   const cleaned = str.replace(/[\s\r\n]/g, '');
   if (!cleaned) return '';
-  // Fix padding: atob requires length to be a multiple of 4
-  const padded = cleaned.length % 4 === 0
-    ? cleaned
-    : cleaned + '='.repeat(4 - (cleaned.length % 4));
+  // Fix padding: atob requires length to be a multiple of 4.
+  // Valid base64 can only have remainder 0, 2, or 3. Remainder 1 is invalid;
+  // trim the trailing character to attempt recovery.
+  let padded = cleaned;
+  const remainder = cleaned.length % 4;
+  if (remainder === 2) padded = cleaned + '==';
+  else if (remainder === 3) padded = cleaned + '=';
+  else if (remainder === 1) padded = cleaned.slice(0, -1);
   try {
     const binaryStr = atob(padded);
     const bytes = new Uint8Array(binaryStr.length);
