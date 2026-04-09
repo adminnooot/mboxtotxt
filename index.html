@@ -174,8 +174,10 @@
 
     <div class="options">
       <label><input type="checkbox" id="optHeaders" checked> Keep email headers (From, To, Date, Subject)</label>
+      <label><input type="checkbox" id="optLabels"> Include Gmail Labels</label>
       <label><input type="checkbox" id="optSeparator" checked> Separator between emails</label>
       <label><input type="checkbox" id="optTimestamp" checked> Sort by date</label>
+      <label><input type="checkbox" id="optQuotes"> Keep quoted replies</label>
     </div>
 
     <button class="btn" id="convertBtn" disabled>
@@ -256,10 +258,26 @@ convertBtn.addEventListener('click', async () => {
   await tick();
 
   const keepHeaders = document.getElementById('optHeaders').checked;
+  const showLabels = document.getElementById('optLabels').checked;
   const addSeparator = document.getElementById('optSeparator').checked;
   const sortByDate = document.getElementById('optTimestamp').checked;
+  const keepQuotes = document.getElementById('optQuotes').checked;
 
-  let cleaned = emails.map(raw => cleanEmail(raw, keepHeaders));
+  const opts = { keepHeaders, showLabels, keepQuotes };
+
+  let cleaned = [];
+  // Process in batches to keep UI responsive
+  const batchSize = 50;
+  for (let i = 0; i < emails.length; i += batchSize) {
+    const batch = emails.slice(i, i + batchSize);
+    for (const raw of batch) {
+      cleaned.push(cleanEmail(raw, opts));
+    }
+    const pct = 50 + ((i / emails.length) * 30);
+    progressFill.style.width = pct + '%';
+    progressText.textContent = `Cleaning ${Math.min(i + batchSize, emails.length)} / ${emails.length} emails…`;
+    await tick();
+  }
 
   // Remove emails that produced no meaningful text
   cleaned = cleaned.filter(e => e.body.trim().length > 0);
@@ -268,7 +286,7 @@ convertBtn.addEventListener('click', async () => {
     cleaned.sort((a, b) => (a.date || 0) - (b.date || 0));
   }
 
-  progressFill.style.width = '80%';
+  progressFill.style.width = '90%';
   progressText.textContent = 'Building output…';
   await tick();
 
@@ -278,7 +296,7 @@ convertBtn.addEventListener('click', async () => {
   // Stats
   const originalSize = new Blob([text]).size;
   const cleanedSize = new Blob([cleanedOutput]).size;
-  const reduction = ((1 - cleanedSize / originalSize) * 100).toFixed(1);
+  const reduction = originalSize > 0 ? ((1 - cleanedSize / originalSize) * 100).toFixed(1) : '0';
 
   statsEl.innerHTML = `
     <div class="stat"><div class="value">${emails.length}</div><div class="label">Emails found</div></div>
@@ -314,14 +332,16 @@ downloadBtn.addEventListener('click', () => {
 // ──────────────────────────────────────────
 
 function parseMbox(text) {
-  // Split on "From " at the start of a line (standard mbox format)
-  // The pattern matches lines starting with "From " followed by an email-like token
+  // Standard mbox "From " separator line.
+  // Matches: "From <token> <dow> <mon> <day> <time> ..." or "From <token>@<domain> ..."
+  // The first line of the file may or may not match; we always start with whatever is there.
   const parts = [];
   const lines = text.split('\n');
   let current = [];
 
   for (const line of lines) {
-    if (/^From\s+\S+/.test(line) && current.length > 0) {
+    // Detect mbox "From " envelope line
+    if (isMboxFromLine(line) && current.length > 0) {
       parts.push(current.join('\n'));
       current = [line];
     } else {
@@ -335,12 +355,21 @@ function parseMbox(text) {
   return parts;
 }
 
+function isMboxFromLine(line) {
+  // Standard mbox From_ line: "From sender@domain day-of-week month day time year"
+  // Also handles Google Takeout format: "From 1788830337207543651@xxx Mon Jan 22 ..."
+  // Must start with "From " and contain a date-like pattern after the sender
+  if (!line.startsWith('From ')) return false;
+  // Must have a day-of-week abbreviation somewhere after "From <token>"
+  return /^From \S+.*\s(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s/i.test(line);
+}
+
 // ──────────────────────────────────────────
 // EMAIL CLEANER
 // ──────────────────────────────────────────
 
-function cleanEmail(raw, keepHeaders) {
-  // Split headers from body
+function cleanEmail(raw, opts) {
+  // Split headers from body — first blank line separates them
   const headerEnd = raw.indexOf('\n\n');
   const headerBlock = headerEnd > -1 ? raw.slice(0, headerEnd) : raw;
   const bodyRaw = headerEnd > -1 ? raw.slice(headerEnd + 2) : '';
@@ -352,21 +381,25 @@ function cleanEmail(raw, keepHeaders) {
   const contentType = (headers['content-type'] || 'text/plain').toLowerCase();
   const encoding = (headers['content-transfer-encoding'] || '').toLowerCase();
 
-  let body = extractBody(bodyRaw, contentType, encoding, headers);
+  let body = extractBody(bodyRaw, contentType, encoding);
 
   // Clean up the body text
-  body = cleanText(body);
+  body = cleanText(body, opts.keepQuotes);
 
   // Build output
   let text = '';
-  const dateObj = headers['date'] ? new Date(headers['date']) : null;
+  const dateObj = headers['date'] ? parseDate(headers['date']) : null;
 
-  if (keepHeaders) {
+  if (opts.keepHeaders) {
     const parts = [];
-    if (headers['date']) parts.push(`Date: ${headers['date']}`);
+    if (headers['date']) parts.push(`Date: ${headers['date'].trim()}`);
     if (headers['from']) parts.push(`From: ${cleanAddress(headers['from'])}`);
     if (headers['to']) parts.push(`To: ${cleanAddress(headers['to'])}`);
-    if (headers['subject']) parts.push(`Subject: ${decodeRFC2047(headers['subject'])}`);
+    if (headers['cc']) parts.push(`Cc: ${cleanAddress(headers['cc'])}`);
+    if (headers['subject']) parts.push(`Subject: ${decodeHeaderValue(headers['subject'])}`);
+    if (opts.showLabels && headers['x-gmail-labels']) {
+      parts.push(`Labels: ${headers['x-gmail-labels'].trim()}`);
+    }
     if (parts.length) text += parts.join('\n') + '\n\n';
   }
 
@@ -375,22 +408,34 @@ function cleanEmail(raw, keepHeaders) {
   return { text: text.trim(), body: body.trim(), date: dateObj };
 }
 
+function parseDate(str) {
+  try {
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+  } catch {
+    return null;
+  }
+}
+
 function parseHeaders(block) {
   const headers = {};
-  // Unfold continued header lines
+  // Unfold continued header lines (lines starting with whitespace are continuations)
   const unfolded = block.replace(/\r?\n([ \t]+)/g, ' ');
   for (const line of unfolded.split('\n')) {
     const idx = line.indexOf(':');
     if (idx > 0) {
       const key = line.slice(0, idx).trim().toLowerCase();
       const val = line.slice(idx + 1).trim();
-      headers[key] = val;
+      // Keep first occurrence for most headers; for some, append
+      if (!headers[key]) {
+        headers[key] = val;
+      }
     }
   }
   return headers;
 }
 
-function extractBody(bodyRaw, contentType, encoding, headers) {
+function extractBody(bodyRaw, contentType, encoding) {
   // Handle multipart messages
   if (contentType.includes('multipart/')) {
     return handleMultipart(bodyRaw, contentType);
@@ -401,7 +446,7 @@ function extractBody(bodyRaw, contentType, encoding, headers) {
   if (contentType.includes('text/html')) {
     decoded = htmlToText(decoded);
   } else if (!contentType.includes('text/')) {
-    // Non-text content (images, attachments) — skip
+    // Non-text content (images, PDFs, attachments) — skip
     return '';
   }
 
@@ -411,7 +456,7 @@ function extractBody(bodyRaw, contentType, encoding, headers) {
 function handleMultipart(bodyRaw, contentType) {
   // Extract boundary
   const boundaryMatch = contentType.match(/boundary\s*=\s*"?([^";\s]+)"?/i);
-  if (!boundaryMatch) return bodyRaw;
+  if (!boundaryMatch) return stripFallback(bodyRaw);
 
   const boundary = boundaryMatch[1];
   const parts = bodyRaw.split('--' + boundary);
@@ -420,7 +465,9 @@ function handleMultipart(bodyRaw, contentType) {
   let htmlText = '';
 
   for (const part of parts) {
-    if (part.trim() === '--' || part.trim() === '') continue;
+    const trimmed = part.trim();
+    // Skip closing boundary marker and empty parts
+    if (trimmed === '--' || trimmed === '' || trimmed.startsWith('--')) continue;
 
     const partHeaderEnd = part.indexOf('\n\n');
     if (partHeaderEnd === -1) continue;
@@ -430,28 +477,44 @@ function handleMultipart(bodyRaw, contentType) {
     const partCT = (partHeaders['content-type'] || 'text/plain').toLowerCase();
     const partEnc = (partHeaders['content-transfer-encoding'] || '').toLowerCase();
 
+    // Skip attachments based on Content-Disposition
+    const disposition = (partHeaders['content-disposition'] || '').toLowerCase();
+    if (disposition.includes('attachment')) continue;
+
     if (partCT.includes('multipart/')) {
-      // Nested multipart
+      // Nested multipart (e.g., multipart/alternative inside multipart/mixed)
       const nested = handleMultipart(partBody, partCT);
-      if (nested) plainText += nested + '\n';
+      if (nested.trim()) {
+        plainText += nested + '\n';
+      }
     } else if (partCT.includes('text/plain')) {
-      plainText += decodeContent(partBody, partEnc) + '\n';
+      const decoded = decodeContent(partBody, partEnc);
+      if (decoded.trim()) plainText += decoded + '\n';
     } else if (partCT.includes('text/html')) {
-      htmlText += decodeContent(partBody, partEnc) + '\n';
+      const decoded = decodeContent(partBody, partEnc);
+      if (decoded.trim()) htmlText += decoded + '\n';
     }
-    // Skip attachments, images, etc.
+    // Skip application/*, image/*, audio/*, etc.
   }
 
-  // Prefer plain text, fall back to converted HTML
+  // Prefer plain text; fall back to converted HTML
   if (plainText.trim()) return plainText;
   if (htmlText.trim()) return htmlToText(htmlText);
   return '';
 }
 
+function stripFallback(text) {
+  // If we couldn't parse multipart properly, try to extract any readable text
+  let t = htmlToText(text);
+  // Remove long base64 blocks
+  t = t.replace(/[A-Za-z0-9+/=]{76,}/g, '');
+  return t;
+}
+
 function decodeContent(text, encoding) {
   if (encoding === 'base64') {
     try {
-      return decodeBase64(text);
+      return decodeBase64UTF8(text);
     } catch {
       return '';
     }
@@ -462,14 +525,17 @@ function decodeContent(text, encoding) {
   return text;
 }
 
-function decodeBase64(str) {
+function decodeBase64UTF8(str) {
   const cleaned = str.replace(/[\s\r\n]/g, '');
+  if (!cleaned) return '';
   try {
-    return decodeURIComponent(
-      atob(cleaned).split('').map(c =>
-        '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
-      ).join('')
-    );
+    // Decode base64 to bytes, then interpret as UTF-8
+    const binaryStr = atob(cleaned);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
   } catch {
     try {
       return atob(cleaned);
@@ -480,23 +546,48 @@ function decodeBase64(str) {
 }
 
 function decodeQuotedPrintable(str) {
-  return str
-    .replace(/=\r?\n/g, '')                     // soft line breaks
-    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) =>  // encoded chars
-      String.fromCharCode(parseInt(hex, 16))
-    );
+  // Remove soft line breaks
+  let result = str.replace(/=\r?\n/g, '');
+  // Decode =XX hex sequences to bytes, then re-interpret as UTF-8
+  const parts = result.split(/((?:=[0-9A-Fa-f]{2})+)/);
+  let decoded = '';
+  for (const part of parts) {
+    if (part.startsWith('=') && /^(=[0-9A-Fa-f]{2})+$/.test(part)) {
+      const hexPairs = part.match(/=[0-9A-Fa-f]{2}/g);
+      const bytes = new Uint8Array(hexPairs.map(h => parseInt(h.slice(1), 16)));
+      decoded += new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    } else {
+      decoded += part;
+    }
+  }
+  return decoded;
 }
 
-function decodeRFC2047(str) {
-  // Decode =?charset?encoding?text?= patterns
-  return str.replace(/=\?([^?]+)\?(Q|B)\?([^?]+)\?=/gi, (match, charset, enc, text) => {
+function decodeHeaderValue(str) {
+  // Decode RFC 2047 =?charset?encoding?text?= patterns
+  return str.replace(/=\?([^?]+)\?(Q|B)\?([^?]*)\?=/gi, (match, charset, enc, text) => {
     if (enc.toUpperCase() === 'B') {
-      try { return atob(text); } catch { return text; }
+      try {
+        const binaryStr = atob(text);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
+        const encoding = charset.toLowerCase().replace('windows-', 'windows').replace('iso-', 'iso');
+        try {
+          return new TextDecoder(charset, { fatal: false }).decode(bytes);
+        } catch {
+          return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+        }
+      } catch {
+        return text;
+      }
     }
     // Q encoding (similar to quoted-printable, underscores = spaces)
-    return text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, hex) =>
+    const decoded = text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, hex) =>
       String.fromCharCode(parseInt(hex, 16))
     );
+    return decoded;
   });
 }
 
@@ -505,15 +596,25 @@ function decodeRFC2047(str) {
 // ──────────────────────────────────────────
 
 function htmlToText(html) {
-  // Remove style/script blocks
+  // Remove style/script/head blocks entirely
   let t = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
   t = t.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+  t = t.replace(/<head[^>]*>[\s\S]*?<\/head>/gi, '');
+
+  // Convert <br> to newlines
+  t = t.replace(/<br\s*\/?>/gi, '\n');
 
   // Block elements → newlines
-  t = t.replace(/<\/?(p|div|br|h[1-6]|li|tr|blockquote|hr|table|thead|tbody|tfoot)[^>]*\/?>/gi, '\n');
+  t = t.replace(/<\/?(p|div|h[1-6]|li|tr|blockquote|hr|table|thead|tbody|tfoot|section|article|header|footer|nav|main|aside|dd|dt|dl|figcaption|figure|details|summary)[^>]*>/gi, '\n');
 
-  // Links: keep text
+  // List items with bullets
+  t = t.replace(/<li[^>]*>/gi, '\n• ');
+
+  // Links: keep the text
   t = t.replace(/<a[^>]*>([\s\S]*?)<\/a>/gi, '$1');
+
+  // Bold/strong: keep text
+  t = t.replace(/<\/?(b|strong|em|i|u|span|font|small|big|sub|sup|mark)[^>]*>/gi, '');
 
   // Remove all remaining HTML tags
   t = t.replace(/<[^>]+>/g, '');
@@ -528,17 +629,28 @@ function decodeHTMLEntities(text) {
   const entities = {
     '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"',
     '&#39;': "'", '&apos;': "'", '&nbsp;': ' ', '&ndash;': '–',
-    '&mdash;': '—', '&laquo;': '«', '&raquo;': '»',
+    '&mdash;': '—', '&laquo;': '«', '&raquo;': '»', '&rsquo;': '\u2019',
+    '&lsquo;': '\u2018', '&rdquo;': '\u201D', '&ldquo;': '\u201C',
     '&bull;': '•', '&hellip;': '…', '&copy;': '©',
-    '&reg;': '®', '&trade;': '™',
+    '&reg;': '®', '&trade;': '™', '&deg;': '°',
+    '&euro;': '€', '&pound;': '£', '&yen;': '¥',
+    '&cent;': '¢', '&times;': '×', '&divide;': '÷',
+    '&frac12;': '½', '&frac14;': '¼', '&frac34;': '¾',
   };
   let result = text;
   for (const [entity, char] of Object.entries(entities)) {
     result = result.split(entity).join(char);
   }
-  // Numeric entities
-  result = result.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
-  result = result.replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  // Numeric entities (decimal)
+  result = result.replace(/&#(\d+);/g, (_, n) => {
+    const code = parseInt(n, 10);
+    try { return String.fromCodePoint(code); } catch { return ''; }
+  });
+  // Numeric entities (hex)
+  result = result.replace(/&#x([0-9a-fA-F]+);/g, (_, h) => {
+    const code = parseInt(h, 16);
+    try { return String.fromCodePoint(code); } catch { return ''; }
+  });
   return result;
 }
 
@@ -546,32 +658,50 @@ function decodeHTMLEntities(text) {
 // TEXT CLEANUP
 // ──────────────────────────────────────────
 
-function cleanText(text) {
+function cleanText(text, keepQuotes) {
   let t = text;
 
   // Normalize line endings
   t = t.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-  // Remove common email clutter
-  // Quoted reply markers
-  t = t.replace(/^>+\s?.*$/gm, '');
+  // Remove stray base64 blocks that leaked through (long lines of base64 chars)
+  t = t.replace(/^[A-Za-z0-9+/]{60,}={0,2}$/gm, '');
 
-  // "On ... wrote:" lines
-  t = t.replace(/^On .{10,80} wrote:\s*$/gm, '');
+  if (!keepQuotes) {
+    // Remove quoted reply lines (lines starting with >)
+    t = t.replace(/^>+\s?.*$/gm, '');
 
-  // Forwarded message headers
-  t = t.replace(/^-+\s*Forwarded message\s*-+$/gim, '');
+    // "On ... wrote:" attribution lines
+    t = t.replace(/^On .{10,200} wrote:\s*$/gm, '');
 
-  // Signature blocks (-- \n followed by short lines)
+    // Forwarded message headers
+    t = t.replace(/^-{2,}\s*Forwarded message\s*-{2,}$/gim, '');
+    t = t.replace(/^-{2,}\s*Original Message\s*-{2,}$/gim, '');
+
+    // Remove "From: / Sent: / To: / Subject:" blocks that appear inside forwarded text
+    t = t.replace(/^(From|Sent|To|Cc|Subject|Date|Importance):\s.*$/gm, (match) => {
+      // Only remove if it looks like a forwarded/quoted header (short line in middle of text)
+      if (match.length < 200) return '';
+      return match;
+    });
+  }
+
+  // Signature blocks (-- \n followed by the rest)
   const sigIdx = t.indexOf('\n-- \n');
-  if (sigIdx > -1 && sigIdx > t.length * 0.5) {
+  if (sigIdx > -1 && sigIdx > t.length * 0.3) {
     t = t.slice(0, sigIdx);
   }
+
+  // Remove common legal disclaimers / confidentiality notices
+  t = t.replace(/(?:^|\n)(?:CONFIDENTIALITY NOTICE|DISCLAIMER|This email and any|This message is intended|If you are not the intended)[\s\S]{0,1000}$/i, '');
+
+  // Remove URLs that are tracking pixels or unsubscribe links (very long URLs)
+  t = t.replace(/https?:\/\/\S{150,}/g, '[link]');
 
   // Excessive blank lines → max 2
   t = t.replace(/\n{3,}/g, '\n\n');
 
-  // Trim leading/trailing whitespace per line
+  // Trim trailing whitespace per line
   t = t.split('\n').map(l => l.trimEnd()).join('\n');
 
   // Trim overall
@@ -581,8 +711,11 @@ function cleanText(text) {
 }
 
 function cleanAddress(addr) {
-  // Simplify email addresses, decode if encoded
-  return decodeRFC2047(addr).replace(/<[^>]+>/g, '').trim() || decodeRFC2047(addr);
+  // Decode RFC 2047, then simplify
+  let cleaned = decodeHeaderValue(addr);
+  // Remove angle-bracketed emails if there's a display name
+  const withName = cleaned.replace(/<[^>]+>/g, '').trim();
+  return withName || cleaned;
 }
 
 // ──────────────────────────────────────────
