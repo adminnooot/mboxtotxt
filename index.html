@@ -113,6 +113,21 @@
     }
     .progress-text { font-size: .8rem; color: #71717a; margin-top: .35rem; }
 
+    /* Status box */
+    .status-box {
+      margin-top: .75rem;
+      padding: .55rem .85rem;
+      background: #1e1e22;
+      border: 1px solid #3f3f46;
+      border-radius: .5rem;
+      font-size: .8rem;
+      color: #a1a1aa;
+      display: none;
+      overflow-wrap: break-word;
+    }
+    .status-box.visible { display: block; }
+    .status-box .status-label { color: #a78bfa; font-weight: 600; margin-right: .3rem; }
+
     /* Stats */
     .stats {
       display: grid;
@@ -188,6 +203,10 @@
       <div class="progress-bar"><div class="progress-bar-fill" id="progressFill"></div></div>
       <p class="progress-text" id="progressText">Processing…</p>
     </div>
+
+    <div class="status-box" id="statusBox">
+      <span class="status-label">⚙ Processing:</span><span id="statusText">—</span>
+    </div>
   </div>
 
   <!-- Results card -->
@@ -212,6 +231,8 @@ const convertBtn = document.getElementById('convertBtn');
 const progressWrap = document.getElementById('progressWrap');
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
+const statusBox = document.getElementById('statusBox');
+const statusText = document.getElementById('statusText');
 const resultsCard = document.getElementById('resultsCard');
 const statsEl = document.getElementById('stats');
 const previewEl = document.getElementById('preview');
@@ -243,65 +264,43 @@ convertBtn.addEventListener('click', async () => {
   if (!selectedFile) return;
   convertBtn.disabled = true;
   progressWrap.classList.add('visible');
+  statusBox.classList.add('visible');
   progressFill.style.width = '0%';
-  progressText.textContent = 'Reading file…';
+  progressText.textContent = 'Starting…';
+  setStatus(`File: ${selectedFile.name} (${formatBytes(selectedFile.size)})`);
 
-  const text = await readFileAsText(selectedFile);
-  progressFill.style.width = '20%';
-  progressText.textContent = 'Parsing emails…';
-
-  // Use setTimeout to allow UI to repaint
-  await tick();
-  const emails = parseMbox(text);
-  progressFill.style.width = '50%';
-  progressText.textContent = `Cleaning ${emails.length} emails…`;
-  await tick();
-
-  const keepHeaders = document.getElementById('optHeaders').checked;
-  const showLabels = document.getElementById('optLabels').checked;
+  const opts = {
+    keepHeaders: document.getElementById('optHeaders').checked,
+    showLabels: document.getElementById('optLabels').checked,
+    keepQuotes: document.getElementById('optQuotes').checked,
+  };
   const addSeparator = document.getElementById('optSeparator').checked;
   const sortByDate = document.getElementById('optTimestamp').checked;
-  const keepQuotes = document.getElementById('optQuotes').checked;
 
-  const opts = { keepHeaders, showLabels, keepQuotes };
-
-  let cleaned = [];
-  // Process in batches to keep UI responsive
-  const batchSize = 50;
-  for (let i = 0; i < emails.length; i += batchSize) {
-    const batch = emails.slice(i, i + batchSize);
-    for (const raw of batch) {
-      cleaned.push(cleanEmail(raw, opts));
-    }
-    const pct = 50 + ((i / emails.length) * 30);
-    progressFill.style.width = pct + '%';
-    progressText.textContent = `Cleaning ${Math.min(i + batchSize, emails.length)} / ${emails.length} emails…`;
-    await tick();
-  }
-
-  // Remove emails that produced no meaningful text
-  cleaned = cleaned.filter(e => e.body.trim().length > 0);
+  // Stream-process the file in chunks to avoid loading the whole file into memory
+  const { results, totalEmails } = await processMboxStream(selectedFile, opts);
 
   if (sortByDate) {
-    cleaned.sort((a, b) => (a.date || 0) - (b.date || 0));
+    results.sort((a, b) => (a.date || 0) - (b.date || 0));
   }
 
-  progressFill.style.width = '90%';
+  progressFill.style.width = '95%';
   progressText.textContent = 'Building output…';
+  setStatus('Assembling final text…');
   await tick();
 
   const separator = addSeparator ? '\n' + '─'.repeat(60) + '\n\n' : '\n\n';
-  cleanedOutput = cleaned.map(e => e.text).join(separator);
+  cleanedOutput = results.map(e => e.text).join(separator);
 
-  // Stats
-  const originalSize = new Blob([text]).size;
   const cleanedSize = new Blob([cleanedOutput]).size;
-  const reduction = originalSize > 0 ? ((1 - cleanedSize / originalSize) * 100).toFixed(1) : '0';
+  const reduction = selectedFile.size > 0
+    ? ((1 - cleanedSize / selectedFile.size) * 100).toFixed(1)
+    : '0';
 
   statsEl.innerHTML = `
-    <div class="stat"><div class="value">${emails.length}</div><div class="label">Emails found</div></div>
-    <div class="stat"><div class="value">${cleaned.length}</div><div class="label">With content</div></div>
-    <div class="stat"><div class="value">${formatBytes(originalSize)}</div><div class="label">Original size</div></div>
+    <div class="stat"><div class="value">${totalEmails}</div><div class="label">Emails found</div></div>
+    <div class="stat"><div class="value">${results.length}</div><div class="label">With content</div></div>
+    <div class="stat"><div class="value">${formatBytes(selectedFile.size)}</div><div class="label">Original size</div></div>
     <div class="stat"><div class="value">${formatBytes(cleanedSize)}</div><div class="label">Clean size</div></div>
     <div class="stat"><div class="value">${reduction}%</div><div class="label">Reduction</div></div>
   `;
@@ -310,6 +309,7 @@ convertBtn.addEventListener('click', async () => {
 
   progressFill.style.width = '100%';
   progressText.textContent = 'Done!';
+  setStatus(`Finished — ${results.length} of ${totalEmails} emails had readable content.`);
   resultsCard.classList.remove('hidden');
   convertBtn.disabled = false;
 });
@@ -405,7 +405,7 @@ function cleanEmail(raw, opts) {
 
   text += body;
 
-  return { text: text.trim(), body: body.trim(), date: dateObj };
+  return { text: text.trim(), body: body.trim(), date: dateObj, subject: headers['subject'] ? decodeHeaderValue(headers['subject']) : '' };
 }
 
 function parseDate(str) {
@@ -732,10 +732,91 @@ function readFileAsText(file) {
   });
 }
 
+function readSliceAsText(slice) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsText(slice);
+  });
+}
+
+// Stream-process an mbox file in fixed-size chunks so the entire file is
+// never held in memory at once (critical for files > 1 GB).
+async function processMboxStream(file, opts) {
+  const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB per chunk
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+  let offset = 0;
+  let chunkIndex = 0;
+  let leftover = '';          // incomplete last line from previous chunk
+  let currentEmailBuf = [];  // lines of the email being accumulated
+  const results = [];
+  let totalEmails = 0;
+
+  while (offset < file.size) {
+    chunkIndex++;
+    const end = Math.min(offset + CHUNK_SIZE, file.size);
+
+    progressFill.style.width = (5 + (offset / file.size) * 85) + '%';
+    progressText.textContent =
+      `Reading ${formatBytes(offset)} / ${formatBytes(file.size)} — ${totalEmails} emails found`;
+    setStatus(
+      `Chunk ${chunkIndex} of ${totalChunks} · ` +
+      `${formatBytes(offset)} read · ${totalEmails} emails processed`
+    );
+
+    const chunkText = await readSliceAsText(file.slice(offset, end));
+    offset = end;
+
+    const combined = leftover + chunkText;
+    const lines = combined.split('\n');
+    leftover = lines.pop() || ''; // last element may be an incomplete line
+
+    for (const line of lines) {
+      if (isMboxFromLine(line) && currentEmailBuf.length > 0) {
+        // We have a complete email — clean and store it
+        const raw = currentEmailBuf.join('\n');
+        const cleaned = cleanEmail(raw, opts);
+        totalEmails++;
+        if (cleaned.body.trim().length > 0) results.push(cleaned);
+        currentEmailBuf = [line];
+
+        if (totalEmails % 25 === 0) {
+          setStatus(
+            `Chunk ${chunkIndex}/${totalChunks} · ` +
+            `email ${totalEmails} · subject: ${(cleaned.subject || '').trim() || '(no subject)'}`
+          );
+          await tick();
+        }
+      } else {
+        currentEmailBuf.push(line);
+      }
+    }
+
+    await tick(); // yield to browser between chunks
+  }
+
+  // Flush the last email
+  if (leftover) currentEmailBuf.push(leftover);
+  if (currentEmailBuf.length > 0) {
+    const raw = currentEmailBuf.join('\n');
+    const cleaned = cleanEmail(raw, opts);
+    totalEmails++;
+    if (cleaned.body.trim().length > 0) results.push(cleaned);
+  }
+
+  return { results, totalEmails };
+}
+
+function setStatus(msg) {
+  statusText.textContent = msg;
+}
+
 function formatBytes(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
 function tick() {
