@@ -373,7 +373,9 @@ downloadBtn.addEventListener('click', () => {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // Delay revoking so the browser has time to start the download;
+  // revoking synchronously can produce a 0-byte file in some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 });
 
 // ──────────────────────────────────────────
@@ -418,6 +420,10 @@ function isMboxFromLine(line) {
 // ──────────────────────────────────────────
 
 function cleanEmail(raw, opts) {
+  // Normalize line endings so that header/body boundary detection works
+  // regardless of whether the source uses \r\n (Windows/email) or \n (Unix).
+  raw = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
   // Split headers from body — first blank line separates them
   const headerEnd = raw.indexOf('\n\n');
   const headerBlock = headerEnd > -1 ? raw.slice(0, headerEnd) : raw;
