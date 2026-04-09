@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MBOX to Clean TXT — for NotebookLM</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #0f0f11;
+      color: #e4e4e7;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #a78bfa, #60a5fa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: .25rem;
+    }
+
+    .subtitle {
+      color: #71717a;
+      margin-bottom: 2rem;
+      font-size: .95rem;
+    }
+
+    .card {
+      background: #18181b;
+      border: 1px solid #27272a;
+      border-radius: 1rem;
+      padding: 2rem;
+      width: 100%;
+      max-width: 640px;
+      margin-bottom: 1.5rem;
+    }
+
+    /* Drop zone */
+    .dropzone {
+      border: 2px dashed #3f3f46;
+      border-radius: .75rem;
+      padding: 3rem 1.5rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+    }
+    .dropzone:hover, .dropzone.dragover {
+      border-color: #a78bfa;
+      background: rgba(167, 139, 250, .06);
+    }
+    .dropzone p { color: #a1a1aa; margin-top: .5rem; font-size: .9rem; }
+    .dropzone .icon { font-size: 2.5rem; }
+
+    .file-input { display: none; }
+
+    /* Options */
+    .options { margin-top: 1.25rem; display: flex; flex-wrap: wrap; gap: .75rem; }
+    .options label {
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+      font-size: .85rem;
+      color: #a1a1aa;
+      cursor: pointer;
+    }
+    .options input[type="checkbox"] {
+      accent-color: #a78bfa;
+      width: 1rem;
+      height: 1rem;
+    }
+
+    /* Button */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: .5rem;
+      margin-top: 1.25rem;
+      padding: .75rem 1.5rem;
+      background: linear-gradient(135deg, #7c3aed, #3b82f6);
+      color: #fff;
+      font-weight: 600;
+      font-size: .95rem;
+      border: none;
+      border-radius: .5rem;
+      cursor: pointer;
+      transition: opacity .2s;
+    }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn:hover:not(:disabled) { opacity: .9; }
+
+    /* Progress */
+    .progress-wrap { margin-top: 1rem; display: none; }
+    .progress-wrap.visible { display: block; }
+    .progress-bar {
+      height: 6px;
+      background: #27272a;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #7c3aed, #3b82f6);
+      transition: width .3s;
+    }
+    .progress-text { font-size: .8rem; color: #71717a; margin-top: .35rem; }
+
+    /* Stats */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: .75rem;
+      margin-top: 1rem;
+    }
+    .stat {
+      background: #1e1e22;
+      border-radius: .5rem;
+      padding: .75rem;
+      text-align: center;
+    }
+    .stat .value { font-size: 1.25rem; font-weight: 700; color: #a78bfa; }
+    .stat .label { font-size: .75rem; color: #71717a; margin-top: .15rem; }
+
+    /* Preview */
+    .preview {
+      margin-top: 1rem;
+      max-height: 300px;
+      overflow-y: auto;
+      background: #111113;
+      border: 1px solid #27272a;
+      border-radius: .5rem;
+      padding: 1rem;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: .8rem;
+      line-height: 1.5;
+      color: #a1a1aa;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .hidden { display: none; }
+
+    footer {
+      margin-top: auto;
+      padding-top: 2rem;
+      color: #52525b;
+      font-size: .8rem;
+    }
+    footer a { color: #a78bfa; text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <h1>📧 MBOX → Clean TXT</h1>
+  <p class="subtitle">Strip the clutter from your emails. Get a clean file for NotebookLM.</p>
+
+  <!-- Upload card -->
+  <div class="card">
+    <div class="dropzone" id="dropzone">
+      <div class="icon">📁</div>
+      <p><strong>Drop your .mbox file here</strong> or click to browse</p>
+      <p id="fileName"></p>
+    </div>
+    <input type="file" class="file-input" id="fileInput" accept=".mbox,.eml">
+
+    <div class="options">
+      <label><input type="checkbox" id="optHeaders" checked> Keep email headers (From, To, Date, Subject)</label>
+      <label><input type="checkbox" id="optLabels"> Include Gmail Labels</label>
+      <label><input type="checkbox" id="optSeparator" checked> Separator between emails</label>
+      <label><input type="checkbox" id="optTimestamp" checked> Sort by date</label>
+      <label><input type="checkbox" id="optQuotes"> Keep quoted replies</label>
+    </div>
+
+    <button class="btn" id="convertBtn" disabled>
+      <span>⚡</span> Convert to Clean TXT
+    </button>
+
+    <div class="progress-wrap" id="progressWrap">
+      <div class="progress-bar"><div class="progress-bar-fill" id="progressFill"></div></div>
+      <p class="progress-text" id="progressText">Processing…</p>
+    </div>
+  </div>
+
+  <!-- Results card -->
+  <div class="card hidden" id="resultsCard">
+    <h2 style="font-size:1.1rem;margin-bottom:.5rem;">✅ Conversion Complete</h2>
+    <div class="stats" id="stats"></div>
+    <div class="preview" id="preview"></div>
+    <button class="btn" id="downloadBtn">⬇ Download Clean TXT</button>
+  </div>
+
+  <footer>
+    Built for <a href="https://notebooklm.google/" target="_blank">NotebookLM</a> ·
+    <a href="https://github.com/adminnooot/mboxtotxt" target="_blank">GitHub</a>
+  </footer>
+
+<script>
+// ── DOM refs ──
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const fileNameEl = document.getElementById('fileName');
+const convertBtn = document.getElementById('convertBtn');
+const progressWrap = document.getElementById('progressWrap');
+const progressFill = document.getElementById('progressFill');
+const progressText = document.getElementById('progressText');
+const resultsCard = document.getElementById('resultsCard');
+const statsEl = document.getElementById('stats');
+const previewEl = document.getElementById('preview');
+const downloadBtn = document.getElementById('downloadBtn');
+
+let selectedFile = null;
+let cleanedOutput = '';
+
+// ── File selection ──
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) handleFile(fileInput.files[0]); });
+
+function handleFile(file) {
+  selectedFile = file;
+  fileNameEl.textContent = `${file.name} (${formatBytes(file.size)})`;
+  convertBtn.disabled = false;
+  resultsCard.classList.add('hidden');
+}
+
+// ── Convert ──
+convertBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+  convertBtn.disabled = true;
+  progressWrap.classList.add('visible');
+  progressFill.style.width = '0%';
+  progressText.textContent = 'Reading file…';
+
+  const text = await readFileAsText(selectedFile);
+  progressFill.style.width = '20%';
+  progressText.textContent = 'Parsing emails…';
+
+  // Use setTimeout to allow UI to repaint
+  await tick();
+  const emails = parseMbox(text);
+  progressFill.style.width = '50%';
+  progressText.textContent = `Cleaning ${emails.length} emails…`;
+  await tick();
+
+  const keepHeaders = document.getElementById('optHeaders').checked;
+  const showLabels = document.getElementById('optLabels').checked;
+  const addSeparator = document.getElementById('optSeparator').checked;
+  const sortByDate = document.getElementById('optTimestamp').checked;
+  const keepQuotes = document.getElementById('optQuotes').checked;
+
+  const opts = { keepHeaders, showLabels, keepQuotes };
+
+  let cleaned = [];
+  // Process in batches to keep UI responsive
+  const batchSize = 50;
+  for (let i = 0; i < emails.length; i += batchSize) {
+    const batch = emails.slice(i, i + batchSize);
+    for (const raw of batch) {
+      cleaned.push(cleanEmail(raw, opts));
+    }
+    const pct = 50 + ((i / emails.length) * 30);
+    progressFill.style.width = pct + '%';
+    progressText.textContent = `Cleaning ${Math.min(i + batchSize, emails.length)} / ${emails.length} emails…`;
+    await tick();
+  }
+
+  // Remove emails that produced no meaningful text
+  cleaned = cleaned.filter(e => e.body.trim().length > 0);
+
+  if (sortByDate) {
+    cleaned.sort((a, b) => (a.date || 0) - (b.date || 0));
+  }
+
+  progressFill.style.width = '90%';
+  progressText.textContent = 'Building output…';
+  await tick();
+
+  const separator = addSeparator ? '\n' + '─'.repeat(60) + '\n\n' : '\n\n';
+  cleanedOutput = cleaned.map(e => e.text).join(separator);
+
+  // Stats
+  const originalSize = new Blob([text]).size;
+  const cleanedSize = new Blob([cleanedOutput]).size;
+  const reduction = originalSize > 0 ? ((1 - cleanedSize / originalSize) * 100).toFixed(1) : '0';
+
+  statsEl.innerHTML = `
+    <div class="stat"><div class="value">${emails.length}</div><div class="label">Emails found</div></div>
+    <div class="stat"><div class="value">${cleaned.length}</div><div class="label">With content</div></div>
+    <div class="stat"><div class="value">${formatBytes(originalSize)}</div><div class="label">Original size</div></div>
+    <div class="stat"><div class="value">${formatBytes(cleanedSize)}</div><div class="label">Clean size</div></div>
+    <div class="stat"><div class="value">${reduction}%</div><div class="label">Reduction</div></div>
+  `;
+
+  previewEl.textContent = cleanedOutput.slice(0, 3000) + (cleanedOutput.length > 3000 ? '\n\n… (truncated preview)' : '');
+
+  progressFill.style.width = '100%';
+  progressText.textContent = 'Done!';
+  resultsCard.classList.remove('hidden');
+  convertBtn.disabled = false;
+});
+
+// ── Download ──
+downloadBtn.addEventListener('click', () => {
+  const blob = new Blob([cleanedOutput], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (selectedFile ? selectedFile.name.replace(/\.mbox$/i, '') : 'emails') + '_clean.txt';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
+// ──────────────────────────────────────────
+// MBOX PARSER
+// ──────────────────────────────────────────
+
+function parseMbox(text) {
+  // Standard mbox "From " separator line.
+  // Matches: "From <token> <dow> <mon> <day> <time> ..." or "From <token>@<domain> ..."
+  // The first line of the file may or may not match; we always start with whatever is there.
+  const parts = [];
+  const lines = text.split('\n');
+  let current = [];
+
+  for (const line of lines) {
+    // Detect mbox "From " envelope line
+    if (isMboxFromLine(line) && current.length > 0) {
+      parts.push(current.join('\n'));
+      current = [line];
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length > 0) {
+    parts.push(current.join('\n'));
+  }
+
+  return parts;
+}
+
+function isMboxFromLine(line) {
+  // Standard mbox From_ line: "From sender@domain day-of-week month day time year"
+  // Also handles Google Takeout format: "From 1788830337207543651@xxx Mon Jan 22 ..."
+  // Must start with "From " and contain a date-like pattern after the sender
+  if (!line.startsWith('From ')) return false;
+  // Must have a day-of-week abbreviation somewhere after "From <token>"
+  return /^From \S+.*\s(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s/i.test(line);
+}
+
+// ──────────────────────────────────────────
+// EMAIL CLEANER
+// ──────────────────────────────────────────
+
+function cleanEmail(raw, opts) {
+  // Split headers from body — first blank line separates them
+  const headerEnd = raw.indexOf('\n\n');
+  const headerBlock = headerEnd > -1 ? raw.slice(0, headerEnd) : raw;
+  const bodyRaw = headerEnd > -1 ? raw.slice(headerEnd + 2) : '';
+
+  // Parse headers (unfold continuation lines)
+  const headers = parseHeaders(headerBlock);
+
+  // Extract useful body
+  const contentType = (headers['content-type'] || 'text/plain').toLowerCase();
+  const encoding = (headers['content-transfer-encoding'] || '').toLowerCase();
+
+  let body = extractBody(bodyRaw, contentType, encoding);
+
+  // Clean up the body text
+  body = cleanText(body, opts.keepQuotes);
+
+  // Build output
+  let text = '';
+  const dateObj = headers['date'] ? parseDate(headers['date']) : null;
+
+  if (opts.keepHeaders) {
+    const parts = [];
+    if (headers['date']) parts.push(`Date: ${headers['date'].trim()}`);
+    if (headers['from']) parts.push(`From: ${cleanAddress(headers['from'])}`);
+    if (headers['to']) parts.push(`To: ${cleanAddress(headers['to'])}`);
+    if (headers['cc']) parts.push(`Cc: ${cleanAddress(headers['cc'])}`);
+    if (headers['subject']) parts.push(`Subject: ${decodeHeaderValue(headers['subject'])}`);
+    if (opts.showLabels && headers['x-gmail-labels']) {
+      parts.push(`Labels: ${headers['x-gmail-labels'].trim()}`);
+    }
+    if (parts.length) text += parts.join('\n') + '\n\n';
+  }
+
+  text += body;
+
+  return { text: text.trim(), body: body.trim(), date: dateObj };
+}
+
+function parseDate(str) {
+  try {
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+  } catch {
+    return null;
+  }
+}
+
+function parseHeaders(block) {
+  const headers = {};
+  // Unfold continued header lines (lines starting with whitespace are continuations)
+  const unfolded = block.replace(/\r?\n([ \t]+)/g, ' ');
+  for (const line of unfolded.split('\n')) {
+    const idx = line.indexOf(':');
+    if (idx > 0) {
+      const key = line.slice(0, idx).trim().toLowerCase();
+      const val = line.slice(idx + 1).trim();
+      // Keep first occurrence for most headers; for some, append
+      if (!headers[key]) {
+        headers[key] = val;
+      }
+    }
+  }
+  return headers;
+}
+
+function extractBody(bodyRaw, contentType, encoding) {
+  // Handle multipart messages
+  if (contentType.includes('multipart/')) {
+    return handleMultipart(bodyRaw, contentType);
+  }
+
+  let decoded = decodeContent(bodyRaw, encoding);
+
+  if (contentType.includes('text/html')) {
+    decoded = htmlToText(decoded);
+  } else if (!contentType.includes('text/')) {
+    // Non-text content (images, PDFs, attachments) — skip
+    return '';
+  }
+
+  return decoded;
+}
+
+function handleMultipart(bodyRaw, contentType) {
+  // Extract boundary
+  const boundaryMatch = contentType.match(/boundary\s*=\s*"?([^";\s]+)"?/i);
+  if (!boundaryMatch) return stripFallback(bodyRaw);
+
+  const boundary = boundaryMatch[1];
+  const parts = bodyRaw.split('--' + boundary);
+
+  let plainText = '';
+  let htmlText = '';
+
+  for (const part of parts) {
+    const trimmed = part.trim();
+    // Skip closing boundary marker and empty parts
+    if (trimmed === '--' || trimmed === '' || trimmed.startsWith('--')) continue;
+
+    const partHeaderEnd = part.indexOf('\n\n');
+    if (partHeaderEnd === -1) continue;
+
+    const partHeaders = parseHeaders(part.slice(0, partHeaderEnd));
+    const partBody = part.slice(partHeaderEnd + 2);
+    const partCT = (partHeaders['content-type'] || 'text/plain').toLowerCase();
+    const partEnc = (partHeaders['content-transfer-encoding'] || '').toLowerCase();
+
+    // Skip attachments based on Content-Disposition
+    const disposition = (partHeaders['content-disposition'] || '').toLowerCase();
+    if (disposition.includes('attachment')) continue;
+
+    if (partCT.includes('multipart/')) {
+      // Nested multipart (e.g., multipart/alternative inside multipart/mixed)
+      const nested = handleMultipart(partBody, partCT);
+      if (nested.trim()) {
+        plainText += nested + '\n';
+      }
+    } else if (partCT.includes('text/plain')) {
+      const decoded = decodeContent(partBody, partEnc);
+      if (decoded.trim()) plainText += decoded + '\n';
+    } else if (partCT.includes('text/html')) {
+      const decoded = decodeContent(partBody, partEnc);
+      if (decoded.trim()) htmlText += decoded + '\n';
+    }
+    // Skip application/*, image/*, audio/*, etc.
+  }
+
+  // Prefer plain text; fall back to converted HTML
+  if (plainText.trim()) return plainText;
+  if (htmlText.trim()) return htmlToText(htmlText);
+  return '';
+}
+
+function stripFallback(text) {
+  // If we couldn't parse multipart properly, try to extract any readable text
+  let t = htmlToText(text);
+  // Remove long base64 blocks
+  t = t.replace(/[A-Za-z0-9+/=]{76,}/g, '');
+  return t;
+}
+
+function decodeContent(text, encoding) {
+  if (encoding === 'base64') {
+    try {
+      return decodeBase64UTF8(text);
+    } catch {
+      return '';
+    }
+  }
+  if (encoding === 'quoted-printable') {
+    return decodeQuotedPrintable(text);
+  }
+  return text;
+}
+
+function decodeBase64UTF8(str) {
+  const cleaned = str.replace(/[\s\r\n]/g, '');
+  if (!cleaned) return '';
+  try {
+    // Decode base64 to bytes, then interpret as UTF-8
+    const binaryStr = atob(cleaned);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  } catch {
+    try {
+      return atob(cleaned);
+    } catch {
+      return '';
+    }
+  }
+}
+
+function decodeQuotedPrintable(str) {
+  // Remove soft line breaks
+  let result = str.replace(/=\r?\n/g, '');
+  // Decode =XX hex sequences to bytes, then re-interpret as UTF-8
+  const parts = result.split(/((?:=[0-9A-Fa-f]{2})+)/);
+  let decoded = '';
+  for (const part of parts) {
+    if (part.startsWith('=') && /^(=[0-9A-Fa-f]{2})+$/.test(part)) {
+      const hexPairs = part.match(/=[0-9A-Fa-f]{2}/g);
+      const bytes = new Uint8Array(hexPairs.map(h => parseInt(h.slice(1), 16)));
+      decoded += new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    } else {
+      decoded += part;
+    }
+  }
+  return decoded;
+}
+
+function decodeHeaderValue(str) {
+  // Decode RFC 2047 =?charset?encoding?text?= patterns
+  return str.replace(/=\?([^?]+)\?(Q|B)\?([^?]*)\?=/gi, (match, charset, enc, text) => {
+    if (enc.toUpperCase() === 'B') {
+      try {
+        const binaryStr = atob(text);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
+        try {
+          return new TextDecoder(charset, { fatal: false }).decode(bytes);
+        } catch {
+          return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+        }
+      } catch {
+        return text;
+      }
+    }
+    // Q encoding (similar to quoted-printable, underscores = spaces)
+    const decoded = text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, hex) =>
+      String.fromCharCode(parseInt(hex, 16))
+    );
+    return decoded;
+  });
+}
+
+// ──────────────────────────────────────────
+// HTML → TEXT
+// ──────────────────────────────────────────
+
+function htmlToText(html) {
+  // Remove style/script/head blocks entirely
+  let t = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+  t = t.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+  t = t.replace(/<head[^>]*>[\s\S]*?<\/head>/gi, '');
+
+  // Convert <br> to newlines
+  t = t.replace(/<br\s*\/?>/gi, '\n');
+
+  // Block elements → newlines
+  t = t.replace(/<\/?(p|div|h[1-6]|li|tr|blockquote|hr|table|thead|tbody|tfoot|section|article|header|footer|nav|main|aside|dd|dt|dl|figcaption|figure|details|summary)[^>]*>/gi, '\n');
+
+  // List items with bullets
+  t = t.replace(/<li[^>]*>/gi, '\n• ');
+
+  // Links: keep the text
+  t = t.replace(/<a[^>]*>([\s\S]*?)<\/a>/gi, '$1');
+
+  // Bold/strong: keep text
+  t = t.replace(/<\/?(b|strong|em|i|u|span|font|small|big|sub|sup|mark)[^>]*>/gi, '');
+
+  // Remove all remaining HTML tags
+  t = t.replace(/<[^>]+>/g, '');
+
+  // Decode HTML entities
+  t = decodeHTMLEntities(t);
+
+  return t;
+}
+
+function decodeHTMLEntities(text) {
+  const entities = {
+    '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"',
+    '&#39;': "'", '&apos;': "'", '&nbsp;': ' ', '&ndash;': '–',
+    '&mdash;': '—', '&laquo;': '«', '&raquo;': '»', '&rsquo;': '\u2019',
+    '&lsquo;': '\u2018', '&rdquo;': '\u201D', '&ldquo;': '\u201C',
+    '&bull;': '•', '&hellip;': '…', '&copy;': '©',
+    '&reg;': '®', '&trade;': '™', '&deg;': '°',
+    '&euro;': '€', '&pound;': '£', '&yen;': '¥',
+    '&cent;': '¢', '&times;': '×', '&divide;': '÷',
+    '&frac12;': '½', '&frac14;': '¼', '&frac34;': '¾',
+  };
+  let result = text;
+  for (const [entity, char] of Object.entries(entities)) {
+    result = result.split(entity).join(char);
+  }
+  // Numeric entities (decimal)
+  result = result.replace(/&#(\d+);/g, (_, n) => {
+    const code = parseInt(n, 10);
+    try { return String.fromCodePoint(code); } catch { return ''; }
+  });
+  // Numeric entities (hex)
+  result = result.replace(/&#x([0-9a-fA-F]+);/g, (_, h) => {
+    const code = parseInt(h, 16);
+    try { return String.fromCodePoint(code); } catch { return ''; }
+  });
+  return result;
+}
+
+// ──────────────────────────────────────────
+// TEXT CLEANUP
+// ──────────────────────────────────────────
+
+function cleanText(text, keepQuotes) {
+  let t = text;
+
+  // Normalize line endings
+  t = t.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  // Remove stray base64 blocks that leaked through (long lines of base64 chars)
+  t = t.replace(/^[A-Za-z0-9+/]{60,}={0,2}$/gm, '');
+
+  if (!keepQuotes) {
+    // Remove quoted reply lines (lines starting with >)
+    t = t.replace(/^>+\s?.*$/gm, '');
+
+    // "On ... wrote:" attribution lines
+    t = t.replace(/^On .{10,200} wrote:\s*$/gm, '');
+
+    // Forwarded message headers
+    t = t.replace(/^-{2,}\s*Forwarded message\s*-{2,}$/gim, '');
+    t = t.replace(/^-{2,}\s*Original Message\s*-{2,}$/gim, '');
+
+    // Remove inline forwarded-message headers (short single-line headers inside the body)
+    const MAX_FORWARDED_HEADER_LEN = 200;
+    t = t.replace(/^(From|Sent|To|Cc|Subject|Date|Importance):\s.*$/gm, (match) => {
+      if (match.length < MAX_FORWARDED_HEADER_LEN) return '';
+      return match;
+    });
+  }
+
+  // Signature block: "-- " followed by signature text. Only strip if it appears
+  // past the first 30% of the email so we don't remove actual content.
+  const MIN_SIG_POSITION = 0.3;
+  const sigIdx = t.indexOf('\n-- \n');
+  if (sigIdx > -1 && sigIdx > t.length * MIN_SIG_POSITION) {
+    t = t.slice(0, sigIdx);
+  }
+
+  // Remove common legal disclaimers / confidentiality notices
+  t = t.replace(/(?:^|\n)(?:CONFIDENTIALITY NOTICE|DISCLAIMER|This email and any|This message is intended|If you are not the intended)[\s\S]{0,1000}$/i, '');
+
+  // Remove URLs that are tracking pixels or unsubscribe links (very long URLs)
+  t = t.replace(/https?:\/\/\S{150,}/g, '[link]');
+
+  // Excessive blank lines → max 2
+  t = t.replace(/\n{3,}/g, '\n\n');
+
+  // Trim trailing whitespace per line
+  t = t.split('\n').map(l => l.trimEnd()).join('\n');
+
+  // Trim overall
+  t = t.trim();
+
+  return t;
+}
+
+function cleanAddress(addr) {
+  // Decode RFC 2047, then simplify
+  let cleaned = decodeHeaderValue(addr);
+  // Remove angle-bracketed emails if there's a display name
+  const withName = cleaned.replace(/<[^>]+>/g, '').trim();
+  return withName || cleaned;
+}
+
+// ──────────────────────────────────────────
+// UTILITIES
+// ──────────────────────────────────────────
+
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsText(file);
+  });
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function tick() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+</script>
+
+</body>
+</html>
